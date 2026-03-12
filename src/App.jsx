@@ -53,12 +53,14 @@ export default function SiddipetBazaar() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
-        // Check if admin
         const adminDoc = await getDoc(doc(db, "admins", firebaseUser.email));
         const admin = adminDoc.exists();
         setUser({ email: firebaseUser.email, uid: firebaseUser.uid, name: firebaseUser.email.split("@")[0] });
         setIsAdmin(admin);
-        setView(admin ? "admin" : "dashboard");
+        // Only redirect if currently on login/signup page
+        if (view === "login" || view === "signup") {
+          setView(admin ? "admin" : "dashboard");
+        }
       } else {
         setUser(null);
         setIsAdmin(false);
@@ -66,6 +68,7 @@ export default function SiddipetBazaar() {
     });
     return () => unsub();
   }, []);
+```
 
   // ── Load businesses ────────────────────────────────────────
   const loadBusinesses = async () => {
