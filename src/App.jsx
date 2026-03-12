@@ -53,14 +53,12 @@ export default function SiddipetBazaar() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
+        // Check if admin
         const adminDoc = await getDoc(doc(db, "admins", firebaseUser.email));
         const admin = adminDoc.exists();
         setUser({ email: firebaseUser.email, uid: firebaseUser.uid, name: firebaseUser.email.split("@")[0] });
         setIsAdmin(admin);
-        // Only redirect if currently on login/signup page
-        if (view === "login" || view === "signup") {
-          setView(admin ? "admin" : "dashboard");
-        }
+        setView(admin ? "admin" : "dashboard");
       } else {
         setUser(null);
         setIsAdmin(false);
@@ -68,7 +66,6 @@ export default function SiddipetBazaar() {
     });
     return () => unsub();
   }, []);
-```
 
   // ── Load businesses ────────────────────────────────────────
   const loadBusinesses = async () => {
@@ -85,7 +82,7 @@ export default function SiddipetBazaar() {
 
   useEffect(() => { loadBusinesses(); }, []);
 
-  // ── Login ──────────────────────────────────────────────────
+  // ── Google Login ───────────────────────────────────────────
   const handleGoogleLogin = async () => {
     setAuthLoading(true);
     setAuthError("");
@@ -93,19 +90,22 @@ export default function SiddipetBazaar() {
       const provider = new GoogleAuthProvider();
       const result = await signInWithPopup(auth, provider);
       const firebaseUser = result.user;
-      // Save to users collection if new
-      await addDoc(collection(db, "users"), {
-        uid: firebaseUser.uid,
-        email: firebaseUser.email,
-        businessName: firebaseUser.displayName || "",
-        createdAt: new Date().toISOString(),
-      });
+      try {
+        await addDoc(collection(db, "users"), {
+          uid: firebaseUser.uid,
+          email: firebaseUser.email,
+          businessName: firebaseUser.displayName || "",
+          createdAt: new Date().toISOString(),
+        });
+      } catch (e) {} // ignore if user already exists
       showNotif("Welcome! 👋 Signed in with Google");
     } catch (e) {
       setAuthError("Google sign-in failed. Please try again.");
     }
     setAuthLoading(false);
   };
+
+  // ── Login ──────────────────────────────────────────────────
   const handleLogin = async () => {
     setAuthLoading(true);
     setAuthError("");
@@ -398,12 +398,11 @@ export default function SiddipetBazaar() {
               </div>
               {authError && <div style={{ background: "#fee", color: "#c00", borderRadius: 8, padding: "10px 14px", fontSize: 13 }}>⚠️ {authError}</div>}
               <button className="btn" onClick={handleGoogleLogin} disabled={authLoading}
-  style={{ width: "100%", padding: 14, background: "white", color: "#333", border: "2px solid #ddd", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, fontSize: 15, marginBottom: 4 }}>
-  <img src="https://www.google.com/favicon.ico" width="18" height="18" />
-  Continue with Google
-</button>
-
-<div style={{ textAlign: "center", color: "#aaa", fontSize: 13, margin: "4px 0" }}>— or —</div>
+                style={{ width: "100%", padding: 14, background: "white", color: "#333", border: "2px solid #ddd", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, fontSize: 15, borderRadius: 10, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
+                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" width="20" height="20" />
+                Continue with Google
+              </button>
+              <div style={{ textAlign: "center", color: "#aaa", fontSize: 13 }}>— or login with email —</div>
               <button className="btn btn-primary" style={{ width: "100%", padding: 14 }} onClick={handleLogin} disabled={authLoading}>
                 {authLoading ? "⏳ Logging in..." : "Login →"}
               </button>
@@ -442,16 +441,12 @@ export default function SiddipetBazaar() {
                   value={authForm.password} onChange={e => setAuthForm(f => ({ ...f, password: e.target.value }))} />
               </div>
               {authError && <div style={{ background: "#fee", color: "#c00", borderRadius: 8, padding: "10px 14px", fontSize: 13 }}>⚠️ {authError}</div>}
-              <div style={{ background: "#F0FFF4", borderRadius: 10, padding: "12px 14px", fontSize: 13, color: "#1a6630" }}>
-                ✅ After signup, submit your listing. Admin reviews & approves before it goes live.
-              </div>
               <button className="btn" onClick={handleGoogleLogin} disabled={authLoading}
-  style={{ width: "100%", padding: 14, background: "white", color: "#333", border: "2px solid #ddd", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, fontSize: 15, marginBottom: 4 }}>
-  <img src="https://www.google.com/favicon.ico" width="18" height="18" />
-  Continue with Google
-</button>
-
-<div style={{ textAlign: "center", color: "#aaa", fontSize: 13, margin: "4px 0" }}>— or —</div>
+                style={{ width: "100%", padding: 14, background: "white", color: "#333", border: "2px solid #ddd", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, fontSize: 15, borderRadius: 10, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
+                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" width="20" height="20" />
+                Continue with Google
+              </button>
+              <div style={{ textAlign: "center", color: "#aaa", fontSize: 13 }}>— or sign up with email —</div>
               <button className="btn btn-primary" style={{ width: "100%", padding: 14 }} onClick={handleSignup} disabled={authLoading}>
                 {authLoading ? "⏳ Creating account..." : "Create Account →"}
               </button>
