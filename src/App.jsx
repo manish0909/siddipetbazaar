@@ -86,6 +86,26 @@ export default function SiddipetBazaar() {
   useEffect(() => { loadBusinesses(); }, []);
 
   // ── Login ──────────────────────────────────────────────────
+  const handleGoogleLogin = async () => {
+    setAuthLoading(true);
+    setAuthError("");
+    try {
+      const provider = new GoogleAuthProvider();
+      const result = await signInWithPopup(auth, provider);
+      const firebaseUser = result.user;
+      // Save to users collection if new
+      await addDoc(collection(db, "users"), {
+        uid: firebaseUser.uid,
+        email: firebaseUser.email,
+        businessName: firebaseUser.displayName || "",
+        createdAt: new Date().toISOString(),
+      });
+      showNotif("Welcome! 👋 Signed in with Google");
+    } catch (e) {
+      setAuthError("Google sign-in failed. Please try again.");
+    }
+    setAuthLoading(false);
+  };
   const handleLogin = async () => {
     setAuthLoading(true);
     setAuthError("");
@@ -377,6 +397,13 @@ export default function SiddipetBazaar() {
                   onKeyDown={e => e.key === "Enter" && handleLogin()} />
               </div>
               {authError && <div style={{ background: "#fee", color: "#c00", borderRadius: 8, padding: "10px 14px", fontSize: 13 }}>⚠️ {authError}</div>}
+              <button className="btn" onClick={handleGoogleLogin} disabled={authLoading}
+  style={{ width: "100%", padding: 14, background: "white", color: "#333", border: "2px solid #ddd", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, fontSize: 15, marginBottom: 4 }}>
+  <img src="https://www.google.com/favicon.ico" width="18" height="18" />
+  Continue with Google
+</button>
+
+<div style={{ textAlign: "center", color: "#aaa", fontSize: 13, margin: "4px 0" }}>— or —</div>
               <button className="btn btn-primary" style={{ width: "100%", padding: 14 }} onClick={handleLogin} disabled={authLoading}>
                 {authLoading ? "⏳ Logging in..." : "Login →"}
               </button>
@@ -418,6 +445,13 @@ export default function SiddipetBazaar() {
               <div style={{ background: "#F0FFF4", borderRadius: 10, padding: "12px 14px", fontSize: 13, color: "#1a6630" }}>
                 ✅ After signup, submit your listing. Admin reviews & approves before it goes live.
               </div>
+              <button className="btn" onClick={handleGoogleLogin} disabled={authLoading}
+  style={{ width: "100%", padding: 14, background: "white", color: "#333", border: "2px solid #ddd", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, fontSize: 15, marginBottom: 4 }}>
+  <img src="https://www.google.com/favicon.ico" width="18" height="18" />
+  Continue with Google
+</button>
+
+<div style={{ textAlign: "center", color: "#aaa", fontSize: 13, margin: "4px 0" }}>— or —</div>
               <button className="btn btn-primary" style={{ width: "100%", padding: 14 }} onClick={handleSignup} disabled={authLoading}>
                 {authLoading ? "⏳ Creating account..." : "Create Account →"}
               </button>
