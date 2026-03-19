@@ -1,0 +1,36 @@
+{
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Cross-Origin-Opener-Policy",
+          "value": "same-origin-allow-popups"
+        },
+        {
+          "key": "Cross-Origin-Embedder-Policy",
+          "value": "unsafe-none"
+        }
+      ]
+    }
+  ]
+}
+```
+
+5. Press **Ctrl+S**
+6. Commit & Push → message: `fix COOP headers for Google auth`
+7. Wait 2 mins for Vercel to redeploy ⏳
+
+---
+
+## Why this fixes it:
+```
+Problem:
+Vercel sets strict COOP headers
+→ blocks Google popup from closing properly
+→ Firebase auth fails
+
+Fix:
+vercel.json tells Vercel to allow popups
+→ Google popup opens AND closes correctly
+→ Firebase auth succeeds! ✅
