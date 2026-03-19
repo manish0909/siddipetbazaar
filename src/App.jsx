@@ -24,6 +24,31 @@ const CATEGORIES = ["All","Food","Medical","Shopping","Services","Automobile","T
 const CAT_EMOJI  = { All:"🏪", Food:"🍛", Medical:"💊", Shopping:"🛍️", Services:"⚙️", Automobile:"🔧", Transport:"🚌", Education:"📚" };
 const CAT_COLOR  = { Food:"#FF6B35", Medical:"#E63946", Shopping:"#7B2D8B", Services:"#1D7874", Automobile:"#2B4162", Transport:"#0D6EFD", Education:"#F4A261" };
 
+// ── Renewal helpers ───────────────────────────────────────
+const ONE_YEAR_MS  = 365 * 24 * 60 * 60 * 1000;
+const THIRTY_DAYS  = 30  * 24 * 60 * 60 * 1000;
+const SEVEN_DAYS   =  7  * 24 * 60 * 60 * 1000;
+const PREMIUM_PRICE = 250;
+
+const getRenewalStatus = (biz) => {
+  if(!biz.approvedAt) return "ok";
+  const approved = new Date(biz.approvedAt).getTime();
+  const now = Date.now();
+  const elapsed = now - approved;
+  const remaining = ONE_YEAR_MS - elapsed;
+  if(remaining <= 0)            return "expired";
+  if(remaining <= SEVEN_DAYS)   return "critical";  // 7 days left
+  if(remaining <= THIRTY_DAYS)  return "warning";   // 30 days left
+  return "ok";
+};
+
+const getDaysLeft = (biz) => {
+  if(!biz.approvedAt) return 365;
+  const approved = new Date(biz.approvedAt).getTime();
+  const remaining = ONE_YEAR_MS - (Date.now() - approved);
+  return Math.max(0, Math.ceil(remaining / (24*60*60*1000)));
+};
+
 const TERMS = `Siddipet Bazaar — Terms & Conditions
 Last updated: ${new Date().toLocaleDateString("en-IN")}
 
@@ -38,9 +63,17 @@ By creating an account you agree to these terms.
 • You must have visited a business to leave a review.
 • Business owners may reply to reviews — replies are labelled "Owner Reply".
 
-3. SUBSCRIPTION (Coming Soon)
-• After 1 year, premium plans will be introduced.
-• Free tier will always remain available.
+3. ANNUAL RENEWAL
+• All listings are valid for 1 year from the date of approval.
+• After 1 year, listings go offline automatically.
+• You will be reminded 30 days and 7 days before expiry.
+• Free renewal: re-submit for admin approval.
+• Premium renewal (₹250/yr): auto-approved instantly.
+
+4. PREMIUM PLAN (₹250/year)
+• Auto-approval on renewal — no waiting.
+• Priority placement in search results.
+• Valid for 1 year from payment date.
 
 4. PRIVACY
 • Your data is stored securely in Firebase.
@@ -82,6 +115,9 @@ export default function App() {
   const [replyText, setReplyText]     = useState({});   // reviewId → text
   const [showReply, setShowReply]     = useState({});   // reviewId → bool
   const [dashTab, setDashTab]         = useState("listings"); // listings | favourites
+  const [showRenewalModal, setShowRenewalModal] = useState(false);
+  const [renewingBiz, setRenewingBiz]           = useState(null);
+  const [paymentStep, setPaymentStep]           = useState("choose"); // choose | upi | done
 
   const toast = (msg, type="ok") => { setNotif({msg,type}); setTimeout(()=>setNotif(null),3000); };
 
@@ -92,13 +128,40 @@ export default function App() {
         const adm  = await getDoc(doc(db,"admins",fu.email));
         const prof = await getDoc(doc(db,"users",fu.uid));
         const profile = prof.exists() ? prof.data() : null;
-        setUser({ email:fu.email, uid:fu.uid, name:fu.displayName||fu.email.split("@")[0] });
+        // Support old accounts that used "businessName" field
+        const displayName = profile?.name
+          || profile?.businessName
+          || fu.displayName
+          || fu.email.split("@")[0];
+        setUser({ email:fu.email, uid:fu.uid, name:displayName });
         setUserProfile(profile);
         setIsAdmin(adm.exists());
         setFavourites(profile?.favourites||[]);
-        if(view==="login"||view==="signup") setView(adm.exists()?"admin":"dashboard");
+        // Auto-migrate old profile if missing fields
+        if(prof.exists() && !profile?.name && (profile?.businessName || fu.displayName)){
+          try{
+            await updateDoc(doc(db,"users",fu.uid),{
+              name: profile?.businessName || fu.displayName || fu.email.split("@")[0],
+              joinedAt: profile?.createdAt || new Date().toISOString(),
+              favourites: profile?.favourites || []
+            });
+          }catch(e){}
+        }
+        // If no profile exists at all, create one
+        if(!prof.exists()){
+          try{
+            await setDoc(doc(db,"users",fu.uid),{
+              uid:fu.uid, email:fu.email,
+              name: fu.displayName || fu.email.split("@")[0],
+              joinedAt: new Date().toISOString(), favourites:[]
+            });
+          }catch(e){}
+        }
+        // Always redirect after login regardless of current view
+        setView(adm.exists()?"admin":"dashboard");
       } else {
         setUser(null); setUserProfile(null); setIsAdmin(false); setFavourites([]);
+        setView("home");
       }
     });
     return ()=>unsub();
@@ -279,8 +342,55 @@ export default function App() {
     }catch(e){ toast("Failed to post reply","err"); }
   };
 
+  // ── Check & expire listings on load ───────────────────────
+  useEffect(()=>{
+    if(businesses.length===0) return;
+    businesses.forEach(async(b)=>{
+      if(b.status==="approved" && getRenewalStatus(b)==="expired"){
+        await updateDoc(doc(db,"businesses",b.id),{ status:"expired" });
+      }
+    });
+  },[businesses]);
+
+  // ── Free renewal (goes back to pending) ───────────────────
+  const submitFreeRenewal = async(biz)=>{
+    await updateDoc(doc(db,"businesses",biz.id),{
+      status:"pending",
+      renewalType:"free",
+      renewalRequestedAt: new Date().toISOString()
+    });
+    await loadBiz();
+    setShowRenewalModal(false);
+    toast("Renewal submitted! Admin will review it ✓");
+  };
+
+  // ── Premium renewal (auto-approved) ───────────────────────
+  const submitPremiumRenewal = async(biz)=>{
+    const newApprovedAt = new Date().toISOString();
+    await updateDoc(doc(db,"businesses",biz.id),{
+      status:"approved",
+      approvedAt: newApprovedAt,
+      renewalType:"premium",
+      isPremium:true,
+      renewedAt: newApprovedAt,
+      premiumPaidAt: newApprovedAt,
+    });
+    await loadBiz();
+    setShowRenewalModal(false);
+    setPaymentStep("choose");
+    toast("Premium renewed! Listing is live ✓");
+  };
+
   // ── Admin actions ──────────────────────────────────────────
-  const approve = async(id)=>{ await updateDoc(doc(db,"businesses",id),{status:"approved"}); await loadBiz(); toast("Approved ✓"); };
+  // When admin approves, set approvedAt timestamp
+  const approve = async(id)=>{
+    await updateDoc(doc(db,"businesses",id),{
+      status:"approved",
+      approvedAt: new Date().toISOString()
+    });
+    await loadBiz();
+    toast("Approved ✓");
+  };
   const reject  = async(id)=>{ await updateDoc(doc(db,"businesses",id),{status:"rejected"}); await loadBiz(); toast("Rejected","err"); };
 
   // ── Filtered businesses — search includes tags ─────────────
@@ -289,20 +399,22 @@ export default function App() {
   const myList    = user ? businesses.filter(b=>b.ownerEmail===user.email) : [];
   const favList   = approved.filter(b=>favourites.includes(b.id));
 
-  const filtered = approved.filter(b=>{
+  // expired = status is "expired" (auto-set after 1 year)
+  const expired   = businesses.filter(b=>b.status==="expired");
+  const filtered  = approved.filter(b=>{
     const q = search.toLowerCase();
     const matchSearch = !q ||
       b.name?.toLowerCase().includes(q) ||
       b.telugu?.includes(search) ||
       b.address?.toLowerCase().includes(q) ||
       b.category?.toLowerCase().includes(q) ||
-      b.tags?.some(t=>t.toLowerCase().includes(q)); // ← tag search!
+      b.tags?.some(t=>t.toLowerCase().includes(q));
     const matchCat = activeCat==="All" || b.category===activeCat;
     return matchSearch && matchCat;
   });
 
-  const joinedDate = userProfile?.joinedAt
-    ? new Date(userProfile.joinedAt).toLocaleDateString("en-IN",{month:"long",year:"numeric"})
+  const joinedDate = userProfile?.joinedAt || userProfile?.createdAt
+    ? new Date(userProfile?.joinedAt || userProfile?.createdAt).toLocaleDateString("en-IN",{month:"long",year:"numeric"})
     : null;
 
   return (
@@ -619,24 +731,83 @@ export default function App() {
                 No listings yet — go to "Add Business" tab!
               </div>
             ):(
-              <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                {myList.map(b=>(
-                  <div key={b.id} style={{background:"white",borderRadius:14,padding:"16px 20px",display:"flex",justifyContent:"space-between",alignItems:"center",border:"1.5px solid #F5EDE8"}}>
-                    <div style={{display:"flex",gap:12,alignItems:"center"}}>
-                      <span style={{fontSize:24}}>{b.icon||"🏪"}</span>
-                      <div>
-                        <div style={{fontWeight:600,fontSize:14}}>{b.name}</div>
-                        <div style={{color:"#CCC",fontSize:12}}>📍 {b.address}</div>
-                        {b.rating>0&&<div style={{color:"#F59E0B",fontSize:12,marginTop:2}}>★ {b.rating} ({b.ratingCount} reviews)</div>}
+              <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                {myList.map(b=>{
+                  const renewStatus = getRenewalStatus(b);
+                  const daysLeft    = getDaysLeft(b);
+                  const isExpired   = b.status==="expired" || renewStatus==="expired";
+                  const isWarning   = renewStatus==="warning" && b.status==="approved";
+                  const isCritical  = renewStatus==="critical" && b.status==="approved";
+                  return (
+                    <div key={b.id} style={{background:"white",borderRadius:16,padding:"18px 20px",border:`1.5px solid ${isExpired?"#FECACA":isCritical?"#FED7AA":isWarning?"#FEF08A":"#F5EDE8"}`}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                        <div style={{display:"flex",gap:12,alignItems:"center"}}>
+                          <span style={{fontSize:24}}>{b.icon||"🏪"}</span>
+                          <div>
+                            <div style={{fontWeight:700,fontSize:14}}>{b.name}</div>
+                            <div style={{color:"#999",fontSize:12,marginTop:2}}>📍 {b.address||"Address not set"}</div>
+                            {b.rating>0&&<div style={{color:"#F59E0B",fontSize:12,marginTop:2}}>★ {b.rating} ({b.ratingCount||0} reviews)</div>}
+                            {b.isPremium&&<div style={{color:"#E8450A",fontSize:11,marginTop:2,fontWeight:600}}>⭐ Premium</div>}
+                          </div>
+                        </div>
+                        <span style={{padding:"4px 14px",borderRadius:50,fontSize:11,fontWeight:700,whiteSpace:"nowrap",
+                          background:isExpired?"#FEF2F2":b.status==="approved"?"#F0FDF4":b.status==="pending"?"#FFFBEB":"#FEF2F2",
+                          color:isExpired?"#DC2626":b.status==="approved"?"#16A34A":b.status==="pending"?"#D97706":"#DC2626"}}>
+                          {isExpired?"Expired":b.status==="approved"?"✓ Live":b.status==="pending"?"Pending":"Rejected"}
+                        </span>
                       </div>
+
+                      {/* Renewal banners */}
+                      {isExpired&&(
+                        <div style={{marginTop:14,background:"#FEF2F2",borderRadius:12,padding:14,border:"1px solid #FECACA"}}>
+                          <div style={{fontWeight:600,fontSize:13,color:"#DC2626",marginBottom:8}}>
+                            ⚠ Your listing has expired and is offline
+                          </div>
+                          <div style={{fontSize:12,color:"#777",marginBottom:12}}>
+                            Renew now to make it visible to customers again.
+                          </div>
+                          <button className="btn btn-o" style={{width:"100%",padding:11,fontSize:13}}
+                            onClick={()=>{ setRenewingBiz(b); setShowRenewalModal(true); setPaymentStep("choose"); }}>
+                            Renew Listing →
+                          </button>
+                        </div>
+                      )}
+
+                      {isCritical&&!isExpired&&(
+                        <div style={{marginTop:14,background:"#FFF7ED",borderRadius:12,padding:14,border:"1px solid #FED7AA"}}>
+                          <div style={{fontWeight:600,fontSize:13,color:"#C2410C",marginBottom:8}}>
+                            🔴 Expires in {daysLeft} day{daysLeft!==1?"s":""} — renew now!
+                          </div>
+                          <button className="btn btn-o" style={{width:"100%",padding:11,fontSize:13}}
+                            onClick={()=>{ setRenewingBiz(b); setShowRenewalModal(true); setPaymentStep("choose"); }}>
+                            Renew Now →
+                          </button>
+                        </div>
+                      )}
+
+                      {isWarning&&!isCritical&&!isExpired&&(
+                        <div style={{marginTop:14,background:"#FEFCE8",borderRadius:12,padding:14,border:"1px solid #FEF08A"}}>
+                          <div style={{fontWeight:600,fontSize:13,color:"#854D0E",marginBottom:8}}>
+                            ⏰ Expires in {daysLeft} days
+                          </div>
+                          <div style={{fontSize:12,color:"#777",marginBottom:10}}>
+                            Renew early to avoid going offline.
+                          </div>
+                          <button className="btn btn-w" style={{width:"100%",padding:11,fontSize:13}}
+                            onClick={()=>{ setRenewingBiz(b); setShowRenewalModal(true); setPaymentStep("choose"); }}>
+                            Renew Early
+                          </button>
+                        </div>
+                      )}
+
+                      {b.status==="approved"&&!isExpired&&!isWarning&&!isCritical&&b.approvedAt&&(
+                        <div style={{marginTop:10,fontSize:11,color:"#CCC"}}>
+                          ✓ Valid until {new Date(new Date(b.approvedAt).getTime()+ONE_YEAR_MS).toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"})}
+                        </div>
+                      )}
                     </div>
-                    <span style={{padding:"4px 14px",borderRadius:50,fontSize:11,fontWeight:700,
-                      background:b.status==="approved"?"#F0FDF4":b.status==="pending"?"#FFFBEB":"#FEF2F2",
-                      color:b.status==="approved"?"#16A34A":b.status==="pending"?"#D97706":"#DC2626"}}>
-                      {b.status==="approved"?"✓ Live":b.status==="pending"?"Pending":"Rejected"}
-                    </span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )
           )}
@@ -740,7 +911,7 @@ export default function App() {
             <div style={{fontSize:11,color:"rgba(232,69,10,0.8)",letterSpacing:1,textTransform:"uppercase",marginBottom:8}}>⚙️ Admin Panel</div>
             <div style={{fontWeight:800,fontSize:22}}>Siddipet Bazaar</div>
             <div style={{display:"flex",gap:32,marginTop:20,paddingTop:20,borderTop:"1px solid rgba(255,255,255,0.1)"}}>
-              {[["Pending",pending.length],["Approved",businesses.filter(b=>b.status==="approved").length],["Rejected",businesses.filter(b=>b.status==="rejected").length]].map(([l,v])=>(
+              {[["Pending",pending.length],["Approved",businesses.filter(b=>b.status==="approved").length],["Expired",businesses.filter(b=>b.status==="expired").length],["Rejected",businesses.filter(b=>b.status==="rejected").length]].map(([l,v])=>(
                 <div key={l}><div style={{fontWeight:800,fontSize:22}}>{v}</div><div style={{fontSize:12,color:"rgba(255,255,255,0.3)",marginTop:2}}>{l}</div></div>
               ))}
             </div>
@@ -781,6 +952,63 @@ export default function App() {
               ))}
             </div>
           )}
+          {/* Expired listings needing renewal */}
+          {businesses.filter(b=>b.status==="expired").length>0&&(
+            <>
+              <div style={{fontWeight:700,fontSize:17,marginBottom:14,marginTop:8}}>
+                ⏰ Expired Listings ({businesses.filter(b=>b.status==="expired").length})
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:28}}>
+                {businesses.filter(b=>b.status==="expired").map(b=>(
+                  <div key={b.id} style={{background:"white",borderRadius:12,padding:"14px 18px",display:"flex",justifyContent:"space-between",alignItems:"center",border:"1.5px solid #FECACA"}}>
+                    <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                      <span style={{fontSize:20}}>{b.icon||"🏪"}</span>
+                      <div>
+                        <div style={{fontWeight:600,fontSize:13}}>{b.name}</div>
+                        <div style={{color:"#CCC",fontSize:11}}>{b.ownerEmail}</div>
+                        {b.renewalType&&<div style={{color:"#E8450A",fontSize:11,marginTop:2}}>
+                          {b.renewalType==="premium"?"⭐ Premium renewal":"Free renewal requested"}
+                        </div>}
+                      </div>
+                    </div>
+                    <span style={{padding:"3px 12px",borderRadius:50,fontSize:11,fontWeight:700,background:"#FEF2F2",color:"#DC2626"}}>
+                      Expired
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          {/* Pending renewals */}
+          {businesses.filter(b=>b.status==="pending"&&b.renewalRequestedAt).length>0&&(
+            <>
+              <div style={{fontWeight:700,fontSize:17,marginBottom:14}}>
+                🔄 Renewal Requests ({businesses.filter(b=>b.status==="pending"&&b.renewalRequestedAt).length})
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:12,marginBottom:28}}>
+                {businesses.filter(b=>b.status==="pending"&&b.renewalRequestedAt).map(b=>(
+                  <div key={b.id} style={{background:"white",borderRadius:18,padding:24,border:"1.5px solid #FFF0EA"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+                      <div style={{display:"flex",gap:14,alignItems:"center"}}>
+                        <span style={{fontSize:28,width:52,height:52,background:"#FFF0EA",borderRadius:14,display:"flex",alignItems:"center",justifyContent:"center"}}>{b.icon||"🏪"}</span>
+                        <div>
+                          <div style={{fontWeight:700,fontSize:16}}>{b.name}</div>
+                          <div style={{color:"#AAA",fontSize:12}}>🔄 Renewal request</div>
+                          <div style={{color:"#AAA",fontSize:11,marginTop:2}}>{b.ownerEmail}</div>
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:10}}>
+                      <button className="btn btn-g" style={{flex:1,padding:12}} onClick={()=>approve(b.id)}>✓ Approve Renewal</button>
+                      <button className="btn btn-r" style={{flex:1,padding:12}} onClick={()=>reject(b.id)}>✕ Reject</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
           <div style={{fontWeight:700,fontSize:17,marginBottom:14}}>All Businesses ({businesses.length})</div>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             {businesses.map(b=>(
@@ -794,9 +1022,9 @@ export default function App() {
                 </div>
                 <div style={{display:"flex",gap:8,alignItems:"center"}}>
                   <span style={{padding:"3px 12px",borderRadius:50,fontSize:11,fontWeight:700,
-                    background:b.status==="approved"?"#F0FDF4":b.status==="pending"?"#FFFBEB":"#FEF2F2",
-                    color:b.status==="approved"?"#16A34A":b.status==="pending"?"#D97706":"#DC2626"}}>
-                    {b.status}
+                    background:b.status==="approved"?"#F0FDF4":b.status==="pending"?"#FFFBEB":b.status==="expired"?"#FEF2F2":"#FEF2F2",
+                    color:b.status==="approved"?"#16A34A":b.status==="pending"?"#D97706":b.status==="expired"?"#DC2626":"#DC2626"}}>
+                    {b.status==="expired"?"⏰ expired":b.status}
                   </span>
                   {b.status!=="approved"&&<button className="btn btn-g" style={{fontSize:11,padding:"5px 12px"}} onClick={()=>approve(b.id)}>Approve</button>}
                   {b.status!=="rejected"&&<button className="btn btn-r" style={{fontSize:11,padding:"5px 12px"}} onClick={()=>reject(b.id)}>Reject</button>}
@@ -961,6 +1189,97 @@ export default function App() {
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════ RENEWAL MODAL ══════════════════ */}
+      {showRenewalModal && renewingBiz && (
+        <div className="center-overlay" onClick={()=>{ setShowRenewalModal(false); setPaymentStep("choose"); }}>
+          <div className="center-card" onClick={e=>e.stopPropagation()} style={{maxWidth:440}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+              <div style={{fontWeight:700,fontSize:18}}>Renew Listing</div>
+              <button onClick={()=>{ setShowRenewalModal(false); setPaymentStep("choose"); }}
+                style={{background:"#F5F5F5",border:"none",borderRadius:"50%",width:32,height:32,cursor:"pointer",fontSize:16,color:"#777"}}>✕</button>
+            </div>
+
+            <div style={{background:"#FFF8F2",borderRadius:14,padding:16,marginBottom:20,border:"1px solid #F5EDE8"}}>
+              <div style={{fontWeight:700,fontSize:15}}>{renewingBiz.icon} {renewingBiz.name}</div>
+              <div style={{color:"#AAA",fontSize:13,marginTop:4}}>📍 {renewingBiz.address}</div>
+              <div style={{color:"#DC2626",fontSize:12,marginTop:6,fontWeight:600}}>
+                ⚠ Listing expired — renew to go live again
+              </div>
+            </div>
+
+            {paymentStep==="choose" && (
+              <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                <div style={{fontWeight:600,fontSize:14,marginBottom:4}}>Choose your plan:</div>
+
+                {/* Free plan */}
+                <div style={{background:"#F9F9F9",borderRadius:14,padding:18,border:"1.5px solid #EEE",cursor:"pointer"}}
+                  onClick={()=>submitFreeRenewal(renewingBiz)}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <div style={{fontWeight:700,fontSize:15}}>Free Plan</div>
+                    <div style={{fontWeight:800,fontSize:18,color:"#16A34A"}}>₹0/yr</div>
+                  </div>
+                  <div style={{fontSize:13,color:"#777",lineHeight:1.6}}>
+                    ✓ Submit for admin approval<br/>
+                    ✓ Goes live after review<br/>
+                    ✗ May take 1-3 days
+                  </div>
+                  <button className="btn btn-w" style={{width:"100%",marginTop:14,padding:12}}>
+                    Submit for Review →
+                  </button>
+                </div>
+
+                {/* Premium plan */}
+                <div style={{background:"#FFF8F2",borderRadius:14,padding:18,border:"2px solid #E8450A",cursor:"pointer"}}
+                  onClick={()=>setPaymentStep("upi")}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <div style={{fontWeight:700,fontSize:15}}>Premium Plan</div>
+                    <div style={{fontWeight:800,fontSize:18,color:"#E8450A"}}>₹250/yr</div>
+                  </div>
+                  <div style={{fontSize:13,color:"#777",lineHeight:1.6}}>
+                    ✓ Auto-approved instantly<br/>
+                    ✓ Goes live immediately<br/>
+                    ✓ Priority in search results
+                  </div>
+                  <button className="btn btn-o" style={{width:"100%",marginTop:14,padding:12}}>
+                    Pay ₹250 & Go Live →
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {paymentStep==="upi" && (
+              <div style={{display:"flex",flexDirection:"column",gap:14,alignItems:"center",textAlign:"center"}}>
+                <div style={{fontWeight:700,fontSize:16}}>Pay ₹250 via UPI</div>
+                <div style={{background:"#F9F9F9",borderRadius:16,padding:24,width:"100%",border:"1px solid #EEE"}}>
+                  <div style={{fontSize:13,color:"#777",marginBottom:12}}>Scan QR or pay to UPI ID:</div>
+                  {/* UPI QR placeholder - replace with your real UPI QR */}
+                  <div style={{width:160,height:160,background:"#EEE",borderRadius:12,margin:"0 auto 16px",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,color:"#AAA"}}>
+                    Your UPI QR Here
+                  </div>
+                  <div style={{fontWeight:700,fontSize:16,color:"#E8450A",marginBottom:4}}>
+                    your-upi@bank {/* ← Replace with your UPI ID */}
+                  </div>
+                  <div style={{fontWeight:800,fontSize:20}}>₹250</div>
+                </div>
+                <div style={{fontSize:13,color:"#AAA",lineHeight:1.6}}>
+                  After paying, click confirm below.<br/>
+                  Your listing will go live immediately.
+                </div>
+                <div style={{display:"flex",gap:10,width:"100%"}}>
+                  <button className="btn btn-w" style={{flex:1,padding:12}} onClick={()=>setPaymentStep("choose")}>← Back</button>
+                  <button className="btn btn-o" style={{flex:2,padding:12}} onClick={()=>submitPremiumRenewal(renewingBiz)}>
+                    ✓ I've Paid — Activate Now
+                  </button>
+                </div>
+                <div style={{fontSize:11,color:"#CCC"}}>
+                  Note: Payments are verified manually. False confirmations will result in account suspension.
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
