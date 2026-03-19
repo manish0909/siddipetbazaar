@@ -118,6 +118,11 @@ export default function App() {
   const [showRenewalModal, setShowRenewalModal] = useState(false);
   const [renewingBiz, setRenewingBiz]           = useState(null);
   const [paymentStep, setPaymentStep]           = useState("choose"); // choose | upi | done
+  const [editingBiz, setEditingBiz]             = useState(null);   // business being edited
+  const [editForm, setEditForm]                 = useState({});     // edit form fields
+  const [editLoading, setEditLoading]           = useState(false);
+  const [showSlotModal, setShowSlotModal]       = useState(false);  // buy more slots modal
+  const [slotPayStep, setSlotPayStep]           = useState("info"); // info | upi
 
   const toast = (msg, type="ok") => { setNotif({msg,type}); setTimeout(()=>setNotif(null),3000); };
 
@@ -184,6 +189,88 @@ export default function App() {
       const snap = await getDocs(query(collection(db,"reviews"),where("bizId","==",bizId)));
       setReviews(r=>({...r,[bizId]:snap.docs.map(d=>({id:d.id,...d.data()}))}));
     }catch(e){}
+  };
+
+  // ── Slot helpers ──────────────────────────────────────────
+  // freeSlots=2, premiumSlots stored in userProfile
+  const freeSlots    = 2;
+  const extraSlots   = userProfile?.extraSlots || 0;   // bought via premium (max +2)
+  const totalSlots   = freeSlots + extraSlots;          // max 4
+  const activeListings = myList ? myList.filter(b=>b.status!=="rejected").length : 0;
+  const canAddMore   = activeListings < totalSlots;
+  const canBuySlots  = totalSlots < 4;
+
+  // validity display helper
+  const getValidUntil = (biz) => {
+    if(!biz.approvedAt) return null;
+    const d = new Date(new Date(biz.approvedAt).getTime() + ONE_YEAR_MS);
+    return d.toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"});
+  };
+
+  // ── Edit business ──────────────────────────────────────────
+  const startEdit = (biz) => {
+    setEditingBiz(biz);
+    setEditForm({
+      name: biz.name||"", telugu: biz.telugu||"",
+      category: biz.category||"Food", address: biz.address||"",
+      phone: biz.phone||"", tags: biz.tags?.join(", ")||"",
+      icon: biz.icon||"🏪"
+    });
+  };
+
+  const saveEdit = async() => {
+    if(!editForm.name||!editForm.address||!editForm.phone){ toast("Fill all required fields","err"); return; }
+    setEditLoading(true);
+    try{
+      // contact details → live immediately
+      // other fields → needs re-approval
+      const contactOnly = editForm.phone === editingBiz.phone && editForm.address === editingBiz.address;
+      const nameChanged = editForm.name !== editingBiz.name;
+      const catChanged  = editForm.category !== editingBiz.category;
+      const needsReview = nameChanged || catChanged ||
+        editForm.telugu !== editingBiz.telugu ||
+        editForm.tags !== editingBiz.tags?.join(", ") ||
+        editForm.icon !== editingBiz.icon;
+
+      const updateData = {
+        phone:   editForm.phone,
+        address: editForm.address,
+        icon:    editForm.icon,
+      };
+
+      if(needsReview){
+        // non-contact changes → pending review
+        updateData.name     = editForm.name;
+        updateData.telugu   = editForm.telugu;
+        updateData.category = editForm.category;
+        updateData.tags     = editForm.tags.split(",").map(t=>t.trim()).filter(Boolean);
+        updateData.status   = "pending";
+        updateData.editedAt = new Date().toISOString();
+        updateData.editNote = "Re-submitted for review after edit";
+        await updateDoc(doc(db,"businesses",editingBiz.id), updateData);
+        toast("Changes submitted for admin review ✓");
+      } else {
+        // only contact details changed → live immediately
+        await updateDoc(doc(db,"businesses",editingBiz.id), updateData);
+        toast("Contact details updated live ✓");
+      }
+
+      await loadBiz();
+      setEditingBiz(null);
+    }catch(e){ toast("Update failed. Try again.","err"); }
+    setEditLoading(false);
+  };
+
+  // ── Buy extra slots ────────────────────────────────────────
+  const confirmSlotPurchase = async() => {
+    const newExtra = (userProfile?.extraSlots||0) + 2;
+    await updateDoc(doc(db,"users",user.uid),{
+      extraSlots: newExtra,
+      slotPurchasedAt: new Date().toISOString()
+    });
+    setUserProfile(p=>({...p, extraSlots:newExtra}));
+    setShowSlotModal(false); setSlotPayStep("info");
+    toast("2 extra slots unlocked! ✓");
   };
 
   // ── Google login ───────────────────────────────────────────
@@ -277,6 +364,7 @@ export default function App() {
   // ── Submit listing ─────────────────────────────────────────
   const submitListing = async()=>{
     if(!addForm.name||!addForm.phone||!addForm.address){ toast("Fill all required fields","err"); return; }
+    if(!canAddMore){ toast(`You've reached your ${totalSlots} listing limit. Buy extra slots!`,"err"); return; }
     if(validatePhone(addForm.phone)){ toast(validatePhone(addForm.phone),"err"); return; }
     if(otpStep!=="verified"){ toast("Verify your phone number first","err"); return; }
     try{
@@ -719,14 +807,39 @@ export default function App() {
 
           {/* Tabs */}
           <div style={{display:"flex",borderBottom:"1px solid #F5EDE8",marginBottom:24,background:"white",borderRadius:"0 0 0 0"}}>
-            {[["listings","🏪 My Listings"],["favourites","❤️ Saved"],["add","➕ Add Business"]].map(([t,l])=>(
+            {[["listings","🏪 My Listings"],["favourites","❤️ Saved"],["add", canAddMore ? "➕ Add Business" : `🔒 Slots Full (${totalSlots}/${totalSlots})`]].map(([t,l])=>(
               <button key={t} className={`dash-tab ${dashTab===t?"on":""}`} onClick={()=>setDashTab(t)}>{l}</button>
             ))}
           </div>
 
           {/* Tab: My Listings */}
           {dashTab==="listings"&&(
-            myList.length===0?(
+            <>
+            {/* Slot usage bar */}
+            <div style={{background:"white",borderRadius:16,padding:18,marginBottom:16,border:"1.5px solid #F5EDE8",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{fontWeight:700,fontSize:14}}>Business Slots</div>
+                <div style={{fontSize:12,color:"#AAA",marginTop:2}}>{activeListings} of {totalSlots} slots used</div>
+              </div>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                {[...Array(4)].map((_,i)=>(
+                  <div key={i} style={{width:28,height:28,borderRadius:8,border:"2px solid",
+                    borderColor: i<totalSlots ? (i<activeListings?"#E8450A":"#F5EDE8") : "#F0F0F0",
+                    background:  i<totalSlots ? (i<activeListings?"#FFF0EA":"white") : "#FAFAFA",
+                    display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>
+                    {i<activeListings?"🏪":i<totalSlots?"○":"🔒"}
+                  </div>
+                ))}
+                {canBuySlots&&(
+                  <button className="btn btn-o" style={{fontSize:11,padding:"6px 12px",borderRadius:50,marginLeft:4}}
+                    onClick={()=>{ setShowSlotModal(true); setSlotPayStep("info"); }}>
+                    + More Slots
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {myList.length===0?(
               <div style={{background:"white",borderRadius:16,padding:32,textAlign:"center",color:"#CCC",border:"1.5px solid #F5EDE8",fontSize:14}}>
                 No listings yet — go to "Add Business" tab!
               </div>
@@ -800,16 +913,27 @@ export default function App() {
                         </div>
                       )}
 
-                      {b.status==="approved"&&!isExpired&&!isWarning&&!isCritical&&b.approvedAt&&(
-                        <div style={{marginTop:10,fontSize:11,color:"#CCC"}}>
-                          ✓ Valid until {new Date(new Date(b.approvedAt).getTime()+ONE_YEAR_MS).toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"})}
+                      {b.status==="approved"&&!isExpired&&b.approvedAt&&(
+                        <div style={{marginTop:10,fontSize:11,color:"#AAA",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <span>📅 Valid until <strong>{getValidUntil(b)}</strong></span>
+                          {!isWarning&&!isCritical&&<span style={{color:"#16A34A",fontWeight:600}}>{daysLeft} days left</span>}
                         </div>
+                      )}
+
+                      {/* Edit button — always visible for non-rejected */}
+                      {b.status!=="rejected"&&(
+                        <button className="btn btn-w" style={{width:"100%",marginTop:12,padding:10,fontSize:13}}
+                          onClick={()=>startEdit(b)}>
+                          ✏️ Edit Listing
+                        </button>
                       )}
                     </div>
                   );
                 })}
               </div>
             )
+          )}
+            </>
           )}
 
           {/* Tab: Saved */}
@@ -1189,6 +1313,149 @@ export default function App() {
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════ EDIT MODAL ══════════════════ */}
+      {editingBiz&&(
+        <div className="center-overlay" onClick={()=>setEditingBiz(null)}>
+          <div className="center-card" onClick={e=>e.stopPropagation()} style={{maxWidth:480}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+              <div style={{fontWeight:700,fontSize:18}}>Edit Listing</div>
+              <button onClick={()=>setEditingBiz(null)} style={{background:"#F5F5F5",border:"none",borderRadius:"50%",width:32,height:32,cursor:"pointer",fontSize:16,color:"#777"}}>✕</button>
+            </div>
+
+            <div style={{background:"#FFF8F2",borderRadius:12,padding:12,marginBottom:18,fontSize:12,color:"#E8450A",border:"1px solid #F5EDE8"}}>
+              ⚡ Phone & address → live immediately<br/>
+              📋 Name, category, tags → submitted for admin review
+            </div>
+
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <div>
+                  <label style={{fontSize:11,fontWeight:700,color:"#AAA",display:"block",marginBottom:4,textTransform:"uppercase",letterSpacing:0.5}}>Name *</label>
+                  <input className="inp" value={editForm.name||""} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))}/>
+                </div>
+                <div>
+                  <label style={{fontSize:11,fontWeight:700,color:"#AAA",display:"block",marginBottom:4,textTransform:"uppercase",letterSpacing:0.5}}>Telugu</label>
+                  <input className="inp" placeholder="తెలుగు పేరు" value={editForm.telugu||""} onChange={e=>setEditForm(f=>({...f,telugu:e.target.value}))}/>
+                </div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <div>
+                  <label style={{fontSize:11,fontWeight:700,color:"#AAA",display:"block",marginBottom:4,textTransform:"uppercase",letterSpacing:0.5}}>Category *</label>
+                  <select className="sel" value={editForm.category||"Food"} onChange={e=>setEditForm(f=>({...f,category:e.target.value}))}>
+                    {CATEGORIES.filter(c=>c!=="All").map(c=><option key={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label style={{fontSize:11,fontWeight:700,color:"#AAA",display:"block",marginBottom:4,textTransform:"uppercase",letterSpacing:0.5}}>Icon</label>
+                  <input className="inp" value={editForm.icon||""} onChange={e=>setEditForm(f=>({...f,icon:e.target.value}))}/>
+                </div>
+              </div>
+              <div>
+                <label style={{fontSize:11,fontWeight:700,color:"#AAA",display:"block",marginBottom:4,textTransform:"uppercase",letterSpacing:0.5}}>Address * ⚡</label>
+                <input className="inp" value={editForm.address||""} onChange={e=>setEditForm(f=>({...f,address:e.target.value}))}/>
+              </div>
+              <div>
+                <label style={{fontSize:11,fontWeight:700,color:"#AAA",display:"block",marginBottom:4,textTransform:"uppercase",letterSpacing:0.5}}>Phone * ⚡</label>
+                <div style={{position:"relative"}}>
+                  <span style={{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)",fontSize:13,color:"#AAA",fontWeight:600}}>+91</span>
+                  <input className="inp" style={{paddingLeft:46}} maxLength={10} value={editForm.phone||""}
+                    onChange={e=>setEditForm(f=>({...f,phone:e.target.value.replace(/\D/g,"")}))}/>
+                </div>
+              </div>
+              <div>
+                <label style={{fontSize:11,fontWeight:700,color:"#AAA",display:"block",marginBottom:4,textTransform:"uppercase",letterSpacing:0.5}}>Tags</label>
+                <input className="inp" placeholder="Home Delivery, Veg, Open 24hrs" value={editForm.tags||""} onChange={e=>setEditForm(f=>({...f,tags:e.target.value}))}/>
+              </div>
+              <div style={{display:"flex",gap:10,marginTop:4}}>
+                <button className="btn btn-o" style={{flex:2,padding:13}} onClick={saveEdit} disabled={editLoading}>
+                  {editLoading?"Saving...":"Save Changes →"}
+                </button>
+                <button className="btn btn-w" style={{flex:1,padding:13}} onClick={()=>setEditingBiz(null)}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════ SLOT PURCHASE MODAL ══════════════════ */}
+      {showSlotModal&&(
+        <div className="center-overlay" onClick={()=>{ setShowSlotModal(false); setSlotPayStep("info"); }}>
+          <div className="center-card" onClick={e=>e.stopPropagation()} style={{maxWidth:420}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+              <div style={{fontWeight:700,fontSize:18}}>Buy More Slots</div>
+              <button onClick={()=>{ setShowSlotModal(false); setSlotPayStep("info"); }}
+                style={{background:"#F5F5F5",border:"none",borderRadius:"50%",width:32,height:32,cursor:"pointer",fontSize:16,color:"#777"}}>✕</button>
+            </div>
+
+            {slotPayStep==="info"&&(
+              <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                <div style={{background:"#FFF8F2",borderRadius:16,padding:20,border:"1.5px solid #F5EDE8"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                    <div style={{fontWeight:700,fontSize:16}}>+2 Business Slots</div>
+                    <div style={{fontWeight:800,fontSize:22,color:"#E8450A"}}>₹250/yr</div>
+                  </div>
+                  <div style={{fontSize:13,color:"#777",lineHeight:1.8}}>
+                    ✓ Add 2 more business listings<br/>
+                    ✓ Slots valid for 1 year<br/>
+                    ✓ Maximum 4 businesses total<br/>
+                    ✓ Renew annually at ₹250
+                  </div>
+                </div>
+
+                <div style={{background:"#F9F9F9",borderRadius:14,padding:16,border:"1px solid #EEE"}}>
+                  <div style={{fontWeight:600,fontSize:13,marginBottom:8}}>Your current slots:</div>
+                  <div style={{display:"flex",gap:8}}>
+                    {[...Array(4)].map((_,i)=>(
+                      <div key={i} style={{flex:1,padding:"10px 0",borderRadius:10,border:"2px solid",textAlign:"center",fontSize:13,fontWeight:600,
+                        borderColor:i<totalSlots?"#E8450A":"#EEE",
+                        background:i<totalSlots?"#FFF0EA":"#FAFAFA",
+                        color:i<totalSlots?"#E8450A":"#CCC"}}>
+                        {i<totalSlots?"🏪":"🔒"}
+                        <div style={{fontSize:10,marginTop:4}}>{i<totalSlots?"Active":"Locked"}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{fontSize:12,color:"#AAA",marginTop:10,textAlign:"center"}}>
+                    After purchase: {totalSlots} → {Math.min(totalSlots+2,4)} slots
+                  </div>
+                </div>
+
+                <button className="btn btn-o" style={{width:"100%",padding:14}} onClick={()=>setSlotPayStep("upi")}>
+                  Pay ₹250 & Unlock Slots →
+                </button>
+              </div>
+            )}
+
+            {slotPayStep==="upi"&&(
+              <div style={{display:"flex",flexDirection:"column",gap:14,alignItems:"center",textAlign:"center"}}>
+                <div style={{fontWeight:700,fontSize:16}}>Pay ₹250 via UPI</div>
+                <div style={{background:"#F9F9F9",borderRadius:16,padding:24,width:"100%",border:"1px solid #EEE"}}>
+                  <div style={{fontSize:13,color:"#777",marginBottom:12}}>Scan QR or pay to UPI ID:</div>
+                  <div style={{width:160,height:160,background:"#EEE",borderRadius:12,margin:"0 auto 16px",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,color:"#AAA",textAlign:"center",padding:8}}>
+                    Add your UPI QR here
+                  </div>
+                  <div style={{fontWeight:700,fontSize:16,color:"#E8450A",marginBottom:4}}>
+                    your-upi@bank {/* ← Replace */}
+                  </div>
+                  <div style={{fontWeight:800,fontSize:20}}>₹250</div>
+                </div>
+                <div style={{fontSize:12,color:"#AAA",lineHeight:1.6}}>
+                  After paying tap confirm below.<br/>
+                  Slots activate immediately.
+                </div>
+                <div style={{display:"flex",gap:10,width:"100%"}}>
+                  <button className="btn btn-w" style={{flex:1,padding:12}} onClick={()=>setSlotPayStep("info")}>← Back</button>
+                  <button className="btn btn-o" style={{flex:2,padding:12}} onClick={confirmSlotPurchase}>
+                    ✓ I've Paid — Unlock Now
+                  </button>
+                </div>
+                <div style={{fontSize:11,color:"#CCC"}}>False confirmations will result in account suspension.</div>
+              </div>
+            )}
           </div>
         </div>
       )}
